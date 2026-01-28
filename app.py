@@ -156,9 +156,7 @@ with st.expander("How to use this"):
 
 st.caption("Educational dashboard only. Final strategy selection remains discretionary.")
 
-st.subheader("Debug: Last 6 Closes Used")
-st.write(last_5_closes.values)
-st.write("Daily moves:", daily_moves.values)
-st.write("Avg:", avg_daily_move_pts)
+
+
 
 
