@@ -3,32 +3,41 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
-from datetime import date
+from plotly.subplots import make_subplots
+from datetime import date, timedelta
 
 # -----------------------------
 # Page setup
 # -----------------------------
-st.set_page_config(page_title="Iron Condor Regime Dashboard (NIFTY)", layout="wide")
-st.title("📊 Iron Condor Regime Dashboard (NIFTY)")
-st.caption("Yahoo Finance via yfinance. This build adds strong debugging + safer parsing so you can see what's happening.")
+st.set_page_config(page_title="Iron Condor Study Dashboard (NIFTY)", layout="wide")
+st.title("📊 Iron Condor Study Dashboard (NIFTY)")
+st.caption("Simple regime + volatility + trend metrics for studying iron condors. No recommendations.")
 
 # -----------------------------
 # Sidebar
 # -----------------------------
 st.sidebar.header("Controls")
 
-default_start = date(2015, 1, 1)
-start_date = st.sidebar.date_input("Start date", value=default_start)
-end_date = st.sidebar.date_input("End date", value=date.today())
+# This is what you WANT to view (e.g., 2026 -> today)
+view_start = st.sidebar.date_input("View start date", value=date(2026, 1, 1))
+view_end = st.sidebar.date_input("View end date", value=date.today())
 
 interval = st.sidebar.selectbox(
     "Interval",
     options=["1d", "1wk", "1mo"],
     index=0,
-    help="Use 1d for regime metrics. 1wk/1mo for higher-level view."
+    help="Use 1d for daily regime metrics."
 )
 
-debug_mode = st.sidebar.toggle("Debug mode (show data diagnostics)", value=True)
+# Extra history to compute indicators properly even if you view only 2026+
+lookback_days = st.sidebar.slider(
+    "Extra lookback (days) for indicator calculation",
+    min_value=100,
+    max_value=1200,
+    value=500,
+    step=50,
+    help="We fetch more history so indicators like MA200, RV60, ADX14 work even for short view windows."
+)
 
 NIFTY_TICKER = "^NSEI"
 VIX_TICKER = "^INDIAVIX"
@@ -47,144 +56,207 @@ def fetch_yf(ticker: str, start: str, end: str, interval: str) -> pd.DataFrame:
         progress=False,
         threads=True,
     )
-
     if df is None or df.empty:
         return pd.DataFrame()
 
-    # Flatten MultiIndex columns if yfinance returns them
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] for c in df.columns]
 
     df = df.reset_index()
+    df.columns = [str(c).strip().title() for c in df.columns]
 
-    # Standardize columns safely
-    cols = []
-    for c in df.columns:
-        if isinstance(c, tuple):
-            c = c[0]
-        cols.append(str(c).strip())
-    df.columns = cols
-
-    # Normalize Date column name
     if "Datetime" in df.columns and "Date" not in df.columns:
         df = df.rename(columns={"Datetime": "Date"})
-    if "date" in [c.lower() for c in df.columns] and "Date" not in df.columns:
-        # just in case weird casing
-        for c in df.columns:
-            if c.lower() == "date":
-                df = df.rename(columns={c: "Date"})
-                break
 
-    # Parse Date properly
     if "Date" in df.columns:
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-        df = df.dropna(subset=["Date"])
-        df = df.sort_values("Date")
+        df = df.dropna(subset=["Date"]).sort_values("Date")
 
     return df
 
-def plot_line(df: pd.DataFrame, x_col: str, y_col: str, title: str):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df[x_col], y=df[y_col], mode="lines", name=y_col))
+# -----------------------------
+# Indicators (simple + standard)
+# -----------------------------
+def realized_vol(close: pd.Series, window: int, ann_factor: int = 252) -> pd.Series:
+    r = close.pct_change()
+    return r.rolling(window).std() * np.sqrt(ann_factor)
+
+def true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
+    prev_close = close.shift(1)
+    tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    return tr
+
+def atr(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) -> pd.Series:
+    tr = true_range(high, low, close)
+    return tr.rolling(window).mean()
+
+def adx(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) -> pd.Series:
+    up_move = high.diff()
+    down_move = -low.diff()
+
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+    tr = true_range(high, low, close)
+    tr_n = pd.Series(tr, index=high.index).rolling(window).sum()
+    plus_dm_n = pd.Series(plus_dm, index=high.index).rolling(window).sum()
+    minus_dm_n = pd.Series(minus_dm, index=high.index).rolling(window).sum()
+
+    plus_di = 100 * (plus_dm_n / tr_n)
+    minus_di = 100 * (minus_dm_n / tr_n)
+
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+    return dx.rolling(window).mean()
+
+# -----------------------------
+# Plots
+# -----------------------------
+def plot_candles(df: pd.DataFrame, title: str):
+    fig = go.Figure(
+        data=[go.Candlestick(
+            x=df["Date"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="OHLC"
+        )]
+    )
+    fig.update_layout(title=title, height=450, margin=dict(l=20, r=20, t=50, b=20))
+    return fig
+
+def plot_metrics(df: pd.DataFrame, title: str):
+    # Simple “study” view: Close+MAs, ADX, RV, VIX
+    fig = make_subplots(
+        rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.05,
+        row_heights=[0.45, 0.18, 0.19, 0.18],
+        subplot_titles=("Close + Moving Averages", "ADX (Trend Strength)", "Realized Vol (Annualized)", "India VIX (IV proxy)")
+    )
+
+    fig.add_trace(go.Scatter(x=df["Date"], y=df["Close"], mode="lines", name="Close"), row=1, col=1)
+    for col, name in [("Ma20", "MA20"), ("Ma50", "MA50"), ("Ma200", "MA200")]:
+        fig.add_trace(go.Scatter(x=df["Date"], y=df[col], mode="lines", name=name), row=1, col=1)
+
+    fig.add_trace(go.Scatter(x=df["Date"], y=df["Adx14"], mode="lines", name="ADX14"), row=2, col=1)
+
+    for col, name in [("Rv10", "RV10"), ("Rv20", "RV20"), ("Rv60", "RV60")]:
+        fig.add_trace(go.Scatter(x=df["Date"], y=df[col], mode="lines", name=name), row=3, col=1)
+
+    fig.add_trace(go.Scatter(x=df["Date"], y=df["Vix"], mode="lines", name="VIX"), row=4, col=1)
+
     fig.update_layout(
-        title=title,
-        xaxis_title="Date",
-        yaxis_title=y_col,
-        height=380,
+        title=title, height=950,
         margin=dict(l=20, r=20, t=50, b=20),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
     return fig
 
-def basic_return_stats(close: pd.Series) -> dict:
-    rets = close.pct_change().dropna()
-    if rets.empty:
-        return {"Last": np.nan, "Ann. Vol": np.nan, "Ann. Return": np.nan, "Max DD": np.nan}
-
-    ann_factor = 252  # ok for 1d; we'll refine later for 1wk/1mo
-    ann_vol = rets.std() * np.sqrt(ann_factor)
-    ann_ret = (1 + rets.mean()) ** ann_factor - 1
-
-    cum = (1 + rets).cumprod()
-    peak = cum.cummax()
-    dd = (cum / peak) - 1
-    max_dd = dd.min()
-
-    return {
-        "Last": float(close.iloc[-1]),
-        "Ann. Vol": float(ann_vol),
-        "Ann. Return": float(ann_ret),
-        "Max DD": float(max_dd),
-    }
-
 # -----------------------------
-# Fetch with visible errors
+# Fetch with lookback buffer
 # -----------------------------
-try:
-    with st.spinner("Fetching NIFTY + VIX data..."):
-        nifty = fetch_yf(NIFTY_TICKER, str(start_date), str(end_date), interval)
-        vix = fetch_yf(VIX_TICKER, str(start_date), str(end_date), interval)
-except Exception as e:
-    st.error("Data fetch crashed. Here’s the exact error:")
-    st.exception(e)
-    st.stop()
+# We fetch from earlier so indicators work, but we DISPLAY only the view window.
+fetch_start = view_start - timedelta(days=int(lookback_days))
 
-# -----------------------------
-# Debug diagnostics (always shows something)
-# -----------------------------
-if debug_mode:
-    st.subheader("🧪 Debug diagnostics")
-    st.write("NIFTY ticker:", NIFTY_TICKER, "| rows:", len(nifty), "| cols:", list(nifty.columns))
-    st.write("VIX ticker:", VIX_TICKER, "| rows:", len(vix), "| cols:", list(vix.columns) if not vix.empty else [])
-    if not nifty.empty:
-        st.write("NIFTY tail:")
-        st.dataframe(nifty.tail(5), use_container_width=True)
-    if not vix.empty:
-        st.write("VIX tail:")
-        st.dataframe(vix.tail(5), use_container_width=True)
+with st.spinner("Fetching NIFTY + VIX..."):
+    nifty = fetch_yf(NIFTY_TICKER, str(fetch_start), str(view_end), interval)
+    vix = fetch_yf(VIX_TICKER, str(fetch_start), str(view_end), interval)
 
-# -----------------------------
-# Validations
-# -----------------------------
 if nifty.empty:
-    st.error("Could not fetch NIFTY data (empty dataframe). Try changing the dates or interval.")
+    st.error("NIFTY data is empty. Try changing dates/interval.")
     st.stop()
 
-if "Close" not in nifty.columns:
-    st.error("NIFTY data fetched but 'Close' column is missing. Columns returned:")
-    st.write(list(nifty.columns))
+needed = {"Date", "Open", "High", "Low", "Close"}
+if not needed.issubset(set(nifty.columns)):
+    st.error(f"NIFTY missing required columns. Got: {list(nifty.columns)}")
     st.stop()
 
-if vix.empty or "Close" not in vix.columns:
-    st.warning("India VIX not available from Yahoo right now (common issue). App will still run with NIFTY only.")
+# Merge VIX
+if not vix.empty and "Close" in vix.columns:
+    vix = vix[["Date", "Close"]].rename(columns={"Close": "Vix"})
+    df = pd.merge(nifty, vix, on="Date", how="left")
+else:
+    df = nifty.copy()
+    df["Vix"] = np.nan
+    st.warning("India VIX not available from Yahoo right now (IV proxy will be blank).")
 
 # -----------------------------
-# Display charts
+# Compute metrics (simple set)
+# -----------------------------
+df["Ma20"] = df["Close"].rolling(20).mean()
+df["Ma50"] = df["Close"].rolling(50).mean()
+df["Ma200"] = df["Close"].rolling(200).mean()
+
+df["Adx14"] = adx(df["High"], df["Low"], df["Close"], window=14)
+
+df["Rv10"] = realized_vol(df["Close"], 10)
+df["Rv20"] = realized_vol(df["Close"], 20)
+df["Rv60"] = realized_vol(df["Close"], 60)
+
+df["Atr14"] = atr(df["High"], df["Low"], df["Close"], window=14)
+df["Atr_pct"] = df["Atr14"] / df["Close"]
+
+# VIX is %; convert to decimal and compare with RV20
+df["Iv_proxy"] = df["Vix"] / 100.0
+df["Iv_minus_rv20"] = df["Iv_proxy"] - df["Rv20"]
+
+# -----------------------------
+# Filter to VIEW window (this is what you asked for)
+# -----------------------------
+view_df = df[(df["Date"].dt.date >= view_start) & (df["Date"].dt.date <= view_end)].copy()
+
+if view_df.empty:
+    st.error("No rows in your view window. Try widening the date range.")
+    st.stop()
+
+latest = view_df.iloc[-1]
+
+# -----------------------------
+# Top snapshot numbers (simple + interpretable)
 # -----------------------------
 st.divider()
-col1, col2 = st.columns(2, gap="large")
+st.subheader("Latest Snapshot (in your view window)")
 
-with col1:
-    st.subheader("NIFTY 50 (Spot Proxy)")
-    st.plotly_chart(plot_line(nifty, "Date", "Close", "NIFTY Close"), use_container_width=True)
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 
-with col2:
-    st.subheader("India VIX")
-    if not vix.empty and "Close" in vix.columns:
-        st.plotly_chart(plot_line(vix, "Date", "Close", "India VIX"), use_container_width=True)
-    else:
-        st.info("No VIX chart (data not returned).")
+c1.metric("Close", f"{latest['Close']:.2f}")
+c2.metric("Open", f"{latest['Open']:.2f}")
+c3.metric("VIX", "-" if np.isnan(latest["Vix"]) else f"{latest['Vix']:.2f}")
+c4.metric("RV20 (ann.)", "-" if np.isnan(latest["Rv20"]) else f"{latest['Rv20']*100:.2f}%")
+c5.metric("ADX14", "-" if np.isnan(latest["Adx14"]) else f"{latest['Adx14']:.1f}")
+c6.metric("ATR% (14)", "-" if np.isnan(latest["Atr_pct"]) else f"{latest['Atr_pct']*100:.2f}%")
 
 # -----------------------------
-# Quick metrics
+# Charts (simple)
+# -----------------------------
+tab1, tab2 = st.tabs(["Candles (OHLC)", "Study Metrics (MA, ADX, RV, VIX)"])
+
+with tab1:
+    st.plotly_chart(plot_candles(view_df, "NIFTY OHLC (Index = Spot Proxy)"), use_container_width=True)
+
+with tab2:
+    # Need columns present even if early rows have NaN
+    plot_cols = ["Date", "Close", "Ma20", "Ma50", "Ma200", "Adx14", "Rv10", "Rv20", "Rv60", "Vix"]
+    plot_df = view_df[plot_cols].copy()
+    st.plotly_chart(plot_metrics(plot_df, "Core Iron Condor Study Metrics"), use_container_width=True)
+
+# -----------------------------
+# Table (keep this style like you said)
 # -----------------------------
 st.divider()
-st.subheader("Quick Metrics")
+st.subheader("Metrics Table (download-ready)")
 
-stats_nifty = basic_return_stats(nifty["Close"])
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("NIFTY Last", f"{stats_nifty['Last']:.2f}")
-m2.metric("Ann. Vol (approx)", f"{stats_nifty['Ann. Vol'] * 100:.2f}%")
-m3.metric("Ann. Return (approx)", f"{stats_nifty['Ann. Return'] * 100:.2f}%")
-m4.metric("Max Drawdown", f"{stats_nifty['Max DD'] * 100:.2f}%")
+cols_to_show = [
+    "Date", "Open", "High", "Low", "Close",
+    "Vix", "Iv_proxy",
+    "Rv10", "Rv20", "Rv60",
+    "Iv_minus_rv20",
+    "Adx14",
+    "Ma20", "Ma50", "Ma200",
+    "Atr_pct"
+]
 
-st.caption("Next: we’ll add regime metrics for iron condors (RV windows, ATR%, trend vs range, VIX percentile, IV-RV spread proxy, and a Condor Score).")
+table_df = view_df[cols_to_show].copy()
+
+# Keep it readable: last 300 rows
+table_df = table_df.tail(300)
+
+st.dataframe(table_df, use_container_width=True)
+
+csv = table_df.to_csv(index=False).encode("utf-8")
+st.download_button("⬇️ Download CSV", data=csv, file_name="iron_condor_metrics.csv", mime="text/csv")
+
