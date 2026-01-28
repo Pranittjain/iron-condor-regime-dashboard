@@ -7,12 +7,12 @@ from datetime import datetime, timezone, timedelta
 # =========================================================
 # PAGE SETUP
 # =========================================================
-st.set_page_config(page_title="Iron Condor – Live Metrics", layout="wide")
+st.set_page_config(page_title="Iron Condor – Live Market Metrics (NIFTY)", layout="wide")
 st.title("⚡ Iron Condor – Live Market Metrics (NIFTY)")
 st.caption("Real-time regime metrics for iron-condor study. Informational only.")
 
 # =========================================================
-# DATA FETCH (STABLE ONLY)
+# DATA FETCH (STABLE SOURCES ONLY)
 # =========================================================
 @st.cache_data(ttl=300)
 def fetch_data(ticker, period="3mo"):
@@ -33,9 +33,14 @@ if nifty.empty or vix.empty:
 # =========================================================
 nifty["ret"] = nifty["Close"].pct_change()
 
-# ---- Realized Volatility ----
+# ---- Realized Volatility (annualized) ----
 rv_5d  = float(nifty["ret"].tail(5).std() * np.sqrt(252))
 rv_20d = float(nifty["ret"].tail(20).std() * np.sqrt(252))
+
+# ---- Average DAILY MOVE in POINTS (last 5 days) ----
+last_5_closes = nifty["Close"].tail(6)   # need 6 prices for 5 moves
+daily_moves = last_5_closes.diff().abs().dropna()
+avg_daily_move_points_5d = float(daily_moves.mean())
 
 # ---- Moving Average ----
 nifty["MA20"] = nifty["Close"].rolling(20).mean()
@@ -51,20 +56,21 @@ nifty["TR"] = np.maximum(
 nifty["ATR14"] = nifty["TR"].rolling(14).mean()
 
 # =========================================================
-# FORCE SAFE SCALARS (NO PANDAS AMBIGUITY)
+# FORCE SAFE SCALARS (NO PANDAS TRUTH ERRORS)
 # =========================================================
 spot = float(nifty["Close"].iloc[-1])
-ma20_series = nifty["MA20"].dropna()
 
+ma20_series = nifty["MA20"].dropna()
 if len(ma20_series) < 6:
     st.error("Not enough data to compute trend metrics yet.")
     st.stop()
 
 ma20 = float(ma20_series.iloc[-1])
 ma_slope = float(ma20_series.iloc[-1] - ma20_series.iloc[-5])
+
 atr_pct = float((nifty["ATR14"].iloc[-1] / spot) * 100)
 
-# ---- Implied Volatility Proxy ----
+# ---- Implied Volatility (VIX proxy) ----
 vix_now = float(vix["Close"].iloc[-1])
 iv_proxy = vix_now / 100
 iv_minus_rv5 = float(iv_proxy - rv_5d)
@@ -83,17 +89,26 @@ else:
     trend_label = "Strong trend"
 
 # =========================================================
-# DELTA BAND (INFORMATIONAL, NOT ADVICE)
+# DELTA STRUCTURE (ANALYSIS, NOT ADVICE)
 # =========================================================
 if trend_label == "Range-bound" and iv_minus_rv5 > 0:
-    delta_band = "10–15 delta (calm / range regime)"
+    delta_structure = (
+        "Short Put: 10–15Δ | Long Put: 5–10Δ\n"
+        "Short Call: 10–15Δ | Long Call: 5–10Δ"
+    )
 elif trend_label == "Mild trend":
-    delta_band = "15–20 delta (balanced regime)"
+    delta_structure = (
+        "Short Put: 15–20Δ | Long Put: 8–12Δ\n"
+        "Short Call: 15–20Δ | Long Call: 8–12Δ"
+    )
 else:
-    delta_band = "20–30 delta (trend risk elevated)"
+    delta_structure = (
+        "Short Put: 25–30Δ | Long Put: 10–15Δ\n"
+        "Short Call: 20–25Δ | Long Call: 8–12Δ"
+    )
 
 # =========================================================
-# DISPLAY
+# DISPLAY METRICS
 # =========================================================
 now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
 st.caption(f"Last update: **{now_ist.strftime('%Y-%m-%d %H:%M:%S IST')}**")
@@ -103,37 +118,37 @@ c1.metric("NIFTY Spot", f"{spot:,.2f}")
 c2.metric("India VIX (IV)", f"{vix_now:.2f}%")
 c3.metric("RV (last 5 days)", f"{rv_5d*100:.2f}%")
 c4.metric("RV (last 20 days)", f"{rv_20d*100:.2f}%")
-c5.metric("IV − RV(5d)", f"{iv_minus_rv5*100:.2f}%")
+c5.metric("IV − RV (5d)", f"{iv_minus_rv5*100:.2f}%")
 
 c6, c7, c8, c9 = st.columns(4)
-c6.metric("ATR % (14)", f"{atr_pct:.2f}%")
-c7.metric("Trend Regime", trend_label)
-c8.metric("Spot vs MA20", "Above MA20" if spot > ma20 else "Below MA20")
-c9.metric("Typical Delta Band", delta_band)
+c6.metric("Avg Daily Move (5d)", f"≈ {avg_daily_move_points_5d:.0f} pts")
+c7.metric("ATR % (14)", f"{atr_pct:.2f}%")
+c8.metric("Trend Regime", trend_label)
+c9.metric("Spot vs MA20", "Below MA20" if spot < ma20 else "Above MA20")
 
 st.divider()
 
 # =========================================================
-# EXPLANATION
+# INTERPRETATION
 # =========================================================
-st.subheader("📌 Regime Summary")
+st.subheader("🧠 Market Read (Interpretation)")
+
 st.markdown(f"""
-- **Trend:** {trend_label}  
-- **Realized Volatility (5d):** {rv_5d*100:.2f}%  
-- **Implied Volatility (VIX):** {vix_now:.2f}%  
-- **IV − RV Spread:** {iv_minus_rv5*100:.2f}%  
-- **ATR % (range proxy):** {atr_pct:.2f}%  
-- **Typical iron-condor delta band:** **{delta_band}**
+- Over the **last 5 trading days**, NIFTY has moved **~{avg_daily_move_points_5d:.0f} points per day on average**.
+- **Implied volatility (VIX)** is **higher than realized volatility**, indicating option premiums are relatively rich.
+- The market is currently in a **{trend_label.lower()}**, trading **{'below' if spot < ma20 else 'above'} its 20-day average**.
+- This environment favors **wider, more conservative iron condor structures**, with increased respect for directional risk.
 """)
 
-with st.expander("What these metrics mean"):
+st.subheader("🧩 Regime-Based Structure Insight (Analysis Only)")
+st.markdown(delta_structure)
+
+with st.expander("How to use this for ATM straddle comparison"):
     st.markdown("""
-- **RV (5 days)** = how much NIFTY actually moved recently  
-- **VIX** = market-priced forward (ATM) volatility  
-- **IV − RV > 0** → options priced richer than realized moves  
-- **ATR %** = how wide the daily range is  
-- **Trend regime** helps avoid tight condors in trending markets  
-- **Delta bands** are regime-based reference ranges, not trade advice
+- Compare **Avg Daily Move (points)** with **ATM straddle price**
+- If straddle price > avg move → premium relatively rich
+- If straddle price < avg move → movement underpriced
+- Trend regime tells you whether range assumptions are fragile
 """)
 
-st.caption("Educational dashboard only. Final strategy selection is discretionary.")
+st.caption("Educational dashboard only. No trade recommendations.")
