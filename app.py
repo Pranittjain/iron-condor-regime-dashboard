@@ -47,7 +47,7 @@ avg_daily_move_pts = float(last_5_closes.diff().abs().dropna().mean())
 # Moving Average
 nifty["MA20"] = nifty["Close"].rolling(20).mean()
 
-# MA20 slope (direction)
+# MA20 slope
 ma20_slope = nifty["MA20"].diff().iloc[-1]
 
 # ATR (14)
@@ -64,13 +64,14 @@ nifty["ATR14"] = nifty["TR"].rolling(14).mean()
 spot = float(nifty["Close"].iloc[-1])
 ma20 = float(nifty["MA20"].dropna().iloc[-1])
 atr_pct = float(nifty["ATR14"].iloc[-1] / spot * 100)
+atr_points = float(nifty["ATR14"].iloc[-1])
 
 # VIX
 vix_now = float(vix["Close"].iloc[-1])
 iv_minus_rv = float(vix_now / 100 - rv_5d)
 
 # ===============================
-# TREND STRENGTH (REGIME)
+# TREND STRENGTH
 # ===============================
 dist_ma = abs(spot - ma20) / spot * 100
 
@@ -91,28 +92,20 @@ elif (spot < ma20) and (ma20_slope < 0):
 else:
     trend_direction = "Neutral / Mixed"
 
-trend_regime = f"{trend_strength} ({trend_direction})"
-
 # ===============================
-# DELTA STRUCTURE MAPPING
+# DELTA STRUCTURE
 # ===============================
 if trend_strength == "Range-bound" and iv_minus_rv > 0:
-    short_put = "10–15 Δ"
-    long_put  = "5–10 Δ"
-    short_call = "10–15 Δ"
-    long_call  = "5–10 Δ"
+    short_put, long_put = "10–15 Δ", "5–10 Δ"
+    short_call, long_call = "10–15 Δ", "5–10 Δ"
 
 elif trend_strength == "Mild trend":
-    short_put = "15–20 Δ"
-    long_put  = "8–12 Δ"
-    short_call = "15–20 Δ"
-    long_call  = "8–12 Δ"
+    short_put, long_put = "15–20 Δ", "8–12 Δ"
+    short_call, long_call = "15–20 Δ", "8–12 Δ"
 
-else:  # Strong trend
-    short_put = "25–30 Δ"
-    long_put  = "10–15 Δ"
-    short_call = "20–25 Δ"
-    long_call  = "8–12 Δ"
+else:
+    short_put, long_put = "25–30 Δ", "10–15 Δ"
+    short_call, long_call = "20–25 Δ", "8–12 Δ"
 
 # ===============================
 # DISPLAY METRICS
@@ -129,7 +122,7 @@ c5.metric("IV − RV (5d)", f"{iv_minus_rv*100:.2f}%")
 
 c6, c7, c8, c9 = st.columns(4)
 c6.metric("ATR % (14)", f"{atr_pct:.2f}%")
-c7.metric("Trend Regime", trend_strength)
+c7.metric("Trend Strength", trend_strength)
 c8.metric("Trend Direction", trend_direction)
 c9.metric("Spot vs MA20", "Below MA20" if spot < ma20 else "Above MA20")
 
@@ -142,7 +135,32 @@ st.subheader("🧠 Market Interpretation")
 
 st.markdown(f"""
 - Over the last **5 trading sessions**, NIFTY has moved **~{avg_daily_move_pts:.0f} points per day on average** (close-to-close).
-- **Implied volatility (VIX)** is {'above' if iv_minus_rv > 0 else 'below'} recent realized volatility, indicating option premiums are {'rich' if iv_minus_rv > 0 else 'thin'}.
+- **Implied volatility (VIX)** is {'above' if iv_minus_rv > 0 else 'below'} realized volatility, meaning option premiums are **{'rich' if iv_minus_rv > 0 else 'thin'}**.
 - Market structure shows a **{trend_strength.lower()} with a {trend_direction.lower()} bias**.
 - Spot is trading **{'below' if spot < ma20 else 'above'} the 20-day moving average**.
-- **ATR implies intraday swings**
+- **ATR implies intraday swings of ~{atr_points:.0f} points**, so intraday risk is meaningful.
+""")
+
+# ===============================
+# DELTA OUTPUT
+# ===============================
+st.subheader("🧩 Iron Condor Delta Framework")
+
+st.markdown(f"""
+**Put Side**
+- Short Put: **{short_put}**
+- Long Put: **{long_put}**
+
+**Call Side**
+- Short Call: **{short_call}**
+- Long Call: **{long_call}**
+""")
+
+with st.expander("How to use this"):
+    st.markdown("""
+- Structural guidance only, not trade recommendations  
+- Combine **trend direction + ATR + avg move** before sizing  
+- Adjust wings wider during trend expansion phases  
+""")
+
+st.caption("Educational dashboard only. Final strategy selection remains discretionary.")
